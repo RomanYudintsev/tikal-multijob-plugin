@@ -3,24 +3,16 @@
 	<parent>
 		<groupId>org.jenkins-ci.plugins</groupId>
 		<artifactId>plugin</artifactId>
-		<version>1.565.1</version>
+		<version>2.9</version>
 	</parent>
 	<!-- parent> <groupId>org.jvnet.hudson.plugins</groupId> <artifactId>hudson-plugin-parent</artifactId> 
 		<version>2.1.0</version> <relativePath>../pom.xml</relativePath> </parent -->
 
 	<artifactId>jenkins-multijob-plugin</artifactId>
-	<version>1.22-SNAPSHOT</version>
+	<version>1.25-SNAPSHOT</version>
 	<name>Jenkins Multijob plugin</name>
 	<description>Enabling full hierarchy of Jenkins jobs</description>
 	<url>http://wiki.jenkins-ci.org/display/JENKINS/Multijob+Plugin</url>
-
-	<distributionManagement>
-		<repository>
-			<id>maven.jenkins-ci.org</id>
-			<url>http://maven.jenkins-ci.org/content/repositories/releases/</url>
-		</repository>
-	</distributionManagement>
-
 
 	<developers>
 		<developer>
@@ -37,6 +29,11 @@
 			<id>itaior</id>
 			<name>Itai Or</name>
 			<email>itai@tikalk.com</email>
+		</developer>
+		<developer>
+			<id>cohencil</id>
+			<name>Chen Cohen</name>
+			<email>chenc@tikalk.com</email>
 		</developer>
 	</developers>
 
@@ -85,6 +82,16 @@
 			<groupId>org.jenkins-ci.main</groupId>
 			<artifactId>maven-plugin</artifactId>
 			<version>2.6</version>
+			<exclusions>
+				<exclusion>
+					<groupId>org.apache.httpcomponents</groupId>
+					<artifactId>httpclient</artifactId>
+				</exclusion>
+				<exclusion>
+					<groupId>org.apache.httpcomponents</groupId>
+					<artifactId>httpcore</artifactId>
+				</exclusion>
+			</exclusions>
 		</dependency>
 
 		<dependency>
@@ -93,10 +100,17 @@
 			<version>1.31</version>
 			<optional>true</optional>
 		</dependency>
+
+		<dependency>
+			<groupId>org.jenkins-ci.plugins</groupId>
+			<artifactId>built-on-column</artifactId>
+			<version>1.1</version>
+		</dependency>
+
 		<dependency>
 			<groupId>org.jenkins-ci.plugins</groupId>
 			<artifactId>matrix-project</artifactId>
-			<version>1.4</version>
+			<version>1.7.1</version>
 			<optional>true</optional>
 		</dependency>
 
@@ -202,4 +216,9 @@
 		</pluginRepository>
 	</pluginRepositories>
 	<packaging>hpi</packaging>
+
+	<properties>
+		<findbugs.failOnError>false</findbugs.failOnError>
+	</properties>
+
 </project>

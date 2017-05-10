@@ -1,63 +1,64 @@
 package com.tikal.jenkins.plugins.multijob;
 
+import com.tikal.jenkins.plugins.multijob.MultiJobBuild.SubBuild;
+import com.tikal.jenkins.plugins.multijob.PhaseJobsConfig.KillPhaseOnJobResultCondition;
+import com.tikal.jenkins.plugins.multijob.counters.CounterHelper;
+import com.tikal.jenkins.plugins.multijob.counters.CounterManager;
+import groovy.util.Eval;
 import hudson.Extension;
 import hudson.FilePath;
 import hudson.Launcher;
 import hudson.Util;
 import hudson.console.HyperlinkNote;
-import hudson.model.*;
+import hudson.model.AbstractBuild;
+import hudson.model.AbstractProject;
+import hudson.model.Action;
+import hudson.model.BallColor;
+import hudson.model.Build;
+import hudson.model.BuildListener;
+import hudson.model.DependecyDeclarer;
+import hudson.model.DependencyGraph;
 import hudson.model.DependencyGraph.Dependency;
+import hudson.model.Executor;
+import hudson.model.Item;
 import hudson.model.Queue.QueueAction;
+import hudson.model.Result;
+import hudson.model.TaskListener;
 import hudson.model.queue.QueueTaskFuture;
 import hudson.scm.ChangeLogSet;
 import hudson.scm.ChangeLogSet.Entry;
 import hudson.tasks.BuildStepDescriptor;
 import hudson.tasks.Builder;
+import jenkins.model.Jenkins;
+import net.sf.json.JSONObject;
+import org.jenkinsci.lib.envinject.EnvInjectLogger;
+import org.jenkinsci.plugins.envinject.EnvInjectBuilder;
+import org.jenkinsci.plugins.envinject.EnvInjectBuilderContributionAction;
+import org.jenkinsci.plugins.envinject.service.EnvInjectActionSetter;
+import org.jenkinsci.plugins.envinject.service.EnvInjectEnvVars;
+import org.jenkinsci.plugins.envinject.service.EnvInjectVariableGetter;
+import org.jenkinsci.plugins.tokenmacro.TokenMacro;
+import org.kohsuke.stapler.DataBoundConstructor;
+import org.kohsuke.stapler.StaplerRequest;
 
-import java.io.IOException;
-import java.util.ArrayList;
-import java.util.HashMap;
-import java.util.HashSet;
-import java.util.Iterator;
-import java.util.List;
-import java.util.Map;
-import java.util.Set;
+import java.io.*;
+import java.nio.charset.Charset;
+import java.nio.charset.StandardCharsets;
+import java.util.*;
 import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.BlockingQueue;
+import java.util.concurrent.Callable;
+import java.util.concurrent.CompletionService;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.ExecutorCompletionService;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.regex.Pattern;
 
-import net.sf.json.JSONObject;
-import jenkins.model.Jenkins;
-
-import java.io.BufferedReader;
-import java.io.File;
-import java.io.FileReader;
-import java.io.FileNotFoundException;
-
-import org.jenkinsci.lib.envinject.EnvInjectException;
-import org.jenkinsci.lib.envinject.EnvInjectLogger;
-import org.jenkinsci.plugins.envinject.EnvInjectBuilderContributionAction;
-import org.jenkinsci.plugins.envinject.EnvInjectBuilder;
-import org.jenkinsci.plugins.envinject.service.EnvInjectActionSetter;
-import org.jenkinsci.plugins.envinject.service.EnvInjectEnvVars;
-import org.jenkinsci.plugins.envinject.service.EnvInjectVariableGetter;
-import org.kohsuke.stapler.DataBoundConstructor;
-import org.kohsuke.stapler.StaplerRequest;
-
-import com.tikal.jenkins.plugins.multijob.MultiJobBuild.SubBuild;
-import com.tikal.jenkins.plugins.multijob.PhaseJobsConfig.KillPhaseOnJobResultCondition;
-import com.tikal.jenkins.plugins.multijob.counters.CounterHelper;
-import com.tikal.jenkins.plugins.multijob.counters.CounterManager;
-
-
-import org.jenkinsci.plugins.tokenmacro.TokenMacro;
-
-import groovy.util.*;
-
+import org.apache.commons.lang.StringUtils;
 public class MultiJobBuilder extends Builder implements DependecyDeclarer {
     /**
      * The name of the parameter in the build.getBuildVariables() to enable the job build, regardless
@@ -68,7 +69,7 @@ public class MultiJobBuilder extends Builder implements DependecyDeclarer {
     private String phaseName;
     private List<PhaseJobsConfig> phaseJobs;
     private ContinuationCondition continuationCondition = ContinuationCondition.SUCCESSFUL;
-
+    private ExecutionType executionType;
 
     final static Pattern PATTERN = Pattern.compile("(\\$\\{.+?\\})", Pattern.CASE_INSENSITIVE);
 
@@ -100,12 +101,19 @@ public class MultiJobBuilder extends Builder implements DependecyDeclarer {
      */
     public static final String PERSISTENT_VARS_PREFIX = "RESUMABLE_";
 
+    @Deprecated
+    public MultiJobBuilder(String phaseName, List<PhaseJobsConfig> phaseJobs,
+                           ContinuationCondition continuationCondition) {
+        this(phaseName, phaseJobs, continuationCondition, ExecutionType.PARALLEL);
+    }
+
     @DataBoundConstructor
     public MultiJobBuilder(String phaseName, List<PhaseJobsConfig> phaseJobs,
-            ContinuationCondition continuationCondition) {
+            ContinuationCondition continuationCondition, ExecutionType executionType) {
         this.phaseName = phaseName;
         this.phaseJobs = Util.fixNull(phaseJobs);
         this.continuationCondition = continuationCondition;
+        this.executionType = executionType;
     }
 
     public String expandToken(String toExpand, final AbstractBuild<?,?> build, final BuildListener listener) {
@@ -164,7 +172,7 @@ public class MultiJobBuilder extends Builder implements DependecyDeclarer {
         if ( lastBuild == null ) {
             return StatusJob.DOESNT_CONTAINS_LASTBUILD;
         }
-        if ( lastBuild.getResult().isWorseThan(Result.UNSTABLE) ) {
+        if ( lastBuild.getResult() != null && lastBuild.getResult().isWorseThan(Result.UNSTABLE) ) {
             return StatusJob.LASTBUILD_RESULT_IS_WORSE_THAN_UNSTABLE;
         }
         if ( !lastBuild.getWorkspace().exists() ) {
@@ -189,37 +197,55 @@ public class MultiJobBuilder extends Builder implements DependecyDeclarer {
     @Override
     @SuppressWarnings({ "rawtypes", "unchecked" })
     public boolean perform(final AbstractBuild<?, ? > build, final Launcher launcher, final BuildListener listener) throws InterruptedException, IOException {
+        Jenkins jenkins = Jenkins.getInstance();
+        MultiJobBuild multiJobBuild = (MultiJobBuild) build;
+        MultiJobProject thisProject = multiJobBuild.getProject();
+
         boolean resume = false;
         Map<String, SubBuild> successBuildMap = new HashMap<String, SubBuild>();
         Map<String, SubBuild> resumeBuildMap = new HashMap<String, SubBuild>();
         MultiJobResumeControl control = build.getAction(MultiJobResumeControl.class);
         if (null != control) {
             MultiJobBuild prevBuild = (MultiJobBuild) control.getRun();
-            for (SubBuild subBuild : prevBuild.getSubBuilds()) {
-                Item item = Jenkins.getInstance().getItem(subBuild.getJobName(), prevBuild.getParent(),
-                    AbstractProject.class);
-                if (item instanceof AbstractProject) {
-                    AbstractProject childProject = (AbstractProject) item;
-                    AbstractBuild childBuild = childProject.getBuildByNumber(subBuild.getBuildNumber());
-                    if (null != childBuild) {
-                        if (Result.SUCCESS.equals(childBuild.getResult())) {
-                            successBuildMap.put(childProject.getUrl(), subBuild);
-                        } else {
-                            resume = true;
-                            resumeBuildMap.put(childProject.getUrl(), subBuild);
+
+            boolean willResumeBuild = true;
+            if (thisProject.getCheckResumeEnvVars()) {
+                String[] variables = thisProject.getResumeEnvVars().split(",");
+                for( int i = 0; i < variables.length; i++ ) {
+                    String previousValue = prevBuild.getEnvironment(listener).get(variables[i]);
+                    String currentValue = build.getEnvironment(listener).get(variables[i]);
+                    if( !StringUtils.equals(previousValue, currentValue) ) {
+                        willResumeBuild = false;
+                        listener.getLogger().println(String.format("Cannot resume the build, values for '%s' do not match: [%s][%s]", variables[i], previousValue, currentValue));
+                        break;
+                    }
+                }
+            }
+            if(willResumeBuild) {
+                for (SubBuild subBuild : prevBuild.getSubBuilds()) {
+                    Item item = Jenkins.getInstance().getItem(subBuild.getJobName(), prevBuild.getParent(),
+                        AbstractProject.class);
+                    if (item instanceof AbstractProject) {
+                        AbstractProject childProject = (AbstractProject) item;
+                        AbstractBuild childBuild = childProject.getBuildByNumber(subBuild.getBuildNumber());
+                        if (null != childBuild) {
+                            if (Result.SUCCESS.equals(childBuild.getResult())) {
+                                successBuildMap.put(childProject.getUrl(), subBuild);
+                            } else {
+                                resume = true;
+                                resumeBuildMap.put(childProject.getUrl(), subBuild);
+                            }
                         }
                     }
                 }
             }
+
             if (!resume) {
                 successBuildMap.clear();
             }
         }
 
-        Jenkins jenkins = Jenkins.getInstance();
-        MultiJobBuild multiJobBuild = (MultiJobBuild) build;
-        MultiJobProject thisProject = multiJobBuild.getProject();
-        Map<PhaseSubJob, PhaseJobsConfig> phaseSubJobs = new HashMap<PhaseSubJob, PhaseJobsConfig>(
+        Map<PhaseSubJob, PhaseJobsConfig> phaseSubJobs = new LinkedHashMap<PhaseSubJob, PhaseJobsConfig>(
                 phaseJobs.size());
         final CounterManager phaseCounters = new CounterManager();
 
@@ -336,14 +362,30 @@ public class MultiJobBuilder extends Builder implements DependecyDeclarer {
             return true;
         }
 
-        ExecutorService executor = Executors.newFixedThreadPool(subTasks.size());
+        if (null == executionType) {
+            executionType = ExecutionType.PARALLEL;
+        }
+        int poolSize = executionType.isParallel() ? subTasks.size() : 1;
+        ExecutorService executor = Executors.newFixedThreadPool(poolSize);
         Set<Result> jobResults = new HashSet<Result>();
         BlockingQueue<SubTask> queue = new ArrayBlockingQueue<SubTask>(subTasks.size());
         for (SubTask subTask : subTasks) {
             SubBuild subBuild = successBuildMap.get(subTask.subJob.getUrl());
             if (null == subBuild) {
-                Runnable worker = new SubJobWorker(thisProject, listener, subTask, queue);
-                executor.execute(worker);
+                CompletionService<Boolean> completion = new ExecutorCompletionService<Boolean>(executor);
+                Callable worker = new SubJobWorker(thisProject, listener, subTask, queue);
+                completion.submit(worker);
+                if (!executionType.isParallel()) {
+                    Future<Boolean> future = completion.take();
+                    try {
+                        future.get();
+                        if (checkPhaseTermination(subTask, subTasks, listener)) {
+                            break;
+                        }
+                    } catch (ExecutionException e) {
+                        listener.getLogger().println("Error while execution subtask " + subTask.subJob.getDisplayName());
+                    }
+                }
             } else {
                 AbstractBuild jobBuild = subTask.subJob.getBuildByNumber(subBuild.getBuildNumber());
                 updateSubBuild(multiJobBuild, thisProject, jobBuild, subBuild.getResult());
@@ -393,7 +435,7 @@ public class MultiJobBuilder extends Builder implements DependecyDeclarer {
         return true;
     }
 
-    public final class SubJobWorker extends Thread {
+    public final class SubJobWorker implements Callable {
         final private MultiJobProject multiJobProject;
         final private BuildListener listener;
         private SubTask subTask;
@@ -410,7 +452,11 @@ public class MultiJobBuilder extends Builder implements DependecyDeclarer {
             this.queue = queue;
         }
 
-        public void run() {
+        /**
+         * Subtask execution
+         * @return value is not used in the builder. Can be used to return some state of the task in the future.
+         */
+        public Object call() {
             Result result = null;
             AbstractBuild jobBuild = null;
             try {
@@ -424,6 +470,9 @@ public class MultiJobBuilder extends Builder implements DependecyDeclarer {
 
                 while (retry <= maxRetries && !finish) {
                     retry++;
+                    if (subTask.isShouldTrigger()) {
+                        subTask.generateFuture();
+                    }
                     QueueTaskFuture<AbstractBuild> future = (QueueTaskFuture<AbstractBuild>) subTask.future;
                     while (true) {
                         if (subTask.isCancelled()) {
@@ -460,13 +509,13 @@ public class MultiJobBuilder extends Builder implements DependecyDeclarer {
                         result = jobBuild.getResult();
                         reportFinish(listener, jobBuild, result);
 
-                        if (result.isWorseOrEqualTo(Result.FAILURE) && result.isCompleteBuild() && subTask.phaseConfig.getEnableRetryStrategy()) {
+                        if (result.isWorseOrEqualTo(Result.UNSTABLE) && result.isCompleteBuild() && subTask.phaseConfig.getEnableRetryStrategy()) {
                             if (isKnownRandomFailure(jobBuild)) {
                                 if (retry <= maxRetries) {
                                     listener.getLogger().println("Known failure detected, retrying this build. Try " + retry + " of " + maxRetries + ".");
                                     updateSubBuild(subTask.multiJobBuild, multiJobProject, jobBuild, result, true);
 
-                                    subTask.GenerateFuture();
+                                    subTask.generateFuture();
                                 } else {
                                     listener.getLogger().println("Known failure detected, max retries (" + maxRetries + ") exceeded.");
                                     updateSubBuild(subTask.multiJobBuild, multiJobProject, jobBuild, result);
@@ -503,6 +552,8 @@ public class MultiJobBuilder extends Builder implements DependecyDeclarer {
                 updateSubBuild(subTask.multiJobBuild, multiJobProject, subTask.phaseConfig);
             }
             queue.add(subTask);
+
+            return Boolean.TRUE;
         }
 
         private List<Pattern> getCompiledPattern() throws FileNotFoundException, InterruptedException {
@@ -511,14 +562,18 @@ public class MultiJobBuilder extends Builder implements DependecyDeclarer {
                 try {
                     listener.getLogger().println("Scanning failed job console output using parsing rule file " + subTask.phaseConfig.getParsingRulesPath() + ".");
                     final File rulesFile = new File(subTask.phaseConfig.getParsingRulesPath());
-                    final BufferedReader reader = new BufferedReader(new FileReader(rulesFile.getAbsolutePath()));
+                    FileInputStream fis = new FileInputStream(rulesFile.getAbsoluteFile());
+                    InputStreamReader isr = new InputStreamReader(fis, StandardCharsets.UTF_8);
+                    final BufferedReader reader = new BufferedReader(isr);
                     try {
                         String line;
                         while ((line = reader.readLine()) != null) {
                             compiledPatterns.add(Pattern.compile(line));
                         }
                     } finally {
-                        reader.close();
+                        if (reader != null) {
+                            reader.close();
+                        }
                     }
                 } catch (Exception e) {
                     if (e instanceof InterruptedException) {
@@ -578,8 +633,9 @@ public class MultiJobBuilder extends Builder implements DependecyDeclarer {
             try {
                 final List<Pattern> patterns = getCompiledPattern();
                 final File logFile = build.getLogFile();
-
-                final BufferedReader reader = new BufferedReader(new FileReader(logFile.getAbsolutePath()));
+                FileInputStream fis = new FileInputStream(logFile);
+                InputStreamReader isr = new InputStreamReader(fis, StandardCharsets.UTF_8);
+                final BufferedReader reader = new BufferedReader(isr);
                 try {
                     int numberOfThreads = 10; // Todo : Add this in Configure section
                     if (numberOfThreads < 0) {
@@ -607,7 +663,9 @@ public class MultiJobBuilder extends Builder implements DependecyDeclarer {
                     }
                     executorAnalyser.shutdownNow();
                 } finally {
-                    reader.close();
+                    if (reader != null) {
+                        reader.close();
+                    }
                 }
             } catch (Exception e) {
                 if (e instanceof InterruptedException) {
@@ -838,11 +896,19 @@ public class MultiJobBuilder extends Builder implements DependecyDeclarer {
     }
 
     private class MultiJobAction implements Action, QueueAction {
-        public AbstractBuild build;
+        public int buildNumber;
         public int index;
 
+        /**
+         * @deprecated
+         * Maintain backwards compatibility with previous versions of this class.
+         * See https://wiki.jenkins-ci.org/display/JENKINS/Hint+on+retaining+backward+compatibility
+         */
+        @Deprecated
+        private transient AbstractBuild build;
+
         public MultiJobAction(AbstractBuild build, int index) {
-            this.build = build;
+            this.buildNumber = build.getNumber();
             this.index = index;
         }
 
@@ -853,12 +919,19 @@ public class MultiJobBuilder extends Builder implements DependecyDeclarer {
                 if (action.index != index) {
                     matches = false;
                 }
-                if (action.build.getNumber() != build.getNumber()) {
+                if (action.buildNumber != buildNumber) {
                     matches = false;
                 }
             }
 
             return !matches;
+        }
+
+        protected Object readResolve() {
+            if (build != null) {
+                buildNumber = build.getNumber();
+            }
+            return this;
         }
 
         public String getIconFileName() {
@@ -1035,6 +1108,42 @@ public class MultiJobBuilder extends Builder implements DependecyDeclarer {
     public void setContinuationCondition(
             ContinuationCondition continuationCondition) {
         this.continuationCondition = continuationCondition;
+    }
+
+    public enum ExecutionType {
+
+        PARALLEL("Running phase jobs in parallel") {
+            @Override
+            public boolean isParallel() {
+                return true;
+            }
+        },
+        SEQUENTIALLY("Running phase jobs sequentially") {
+            @Override
+            public boolean isParallel() {
+                return false;
+            }
+        };
+
+        final private String label;
+
+        ExecutionType(String label) {
+            this.label = label;
+        }
+
+        public String getLabel() {
+            return label;
+        }
+
+        abstract public boolean isParallel();
+    }
+
+    public void setExecutionType(ExecutionType executionType) {
+        this.executionType = executionType;
+    }
+
+    public ExecutionType getExecutionType() {
+        return executionType;
     }
 
     public boolean prebuild(Build build, BuildListener listener) {

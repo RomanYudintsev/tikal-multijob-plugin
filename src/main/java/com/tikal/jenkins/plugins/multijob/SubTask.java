@@ -1,12 +1,9 @@
 package com.tikal.jenkins.plugins.multijob;
 
 
-import hudson.model.Action;
-import hudson.model.Run;
-import hudson.model.Result;
-import hudson.model.AbstractBuild;
-import hudson.model.AbstractProject;
+import hudson.model.*;
 import hudson.model.Cause.UpstreamCause;
+import jenkins.model.Jenkins;
 
 import java.util.List;
 import java.util.concurrent.Future;
@@ -35,11 +32,22 @@ public final class SubTask {
     }
 
     public boolean isCancelled() {
-        return cancel;
+        return cancel || future.isCancelled();
     }
 
-    public void cancelJob() {
+    public void cancelJob(MultiJobBuilder multiJobBuilder) {
         this.cancel = true;
+        multiJobBuilder.isCanceled = true;
+        if (future != null) {
+            Queue queue = Jenkins.getInstance().getQueue();
+            synchronized (queue) {
+                List<Queue.Item> items = queue.getItems(subJob);
+                for (Queue.Item item : items) {
+                    if (item.getFuture() == Future.class.cast(future))
+                        queue.cancel(item);
+                }
+            }
+        }
     }
 
     public void generateFuture() {

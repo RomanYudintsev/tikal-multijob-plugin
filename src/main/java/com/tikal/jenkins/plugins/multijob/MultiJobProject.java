@@ -1,32 +1,24 @@
 package com.tikal.jenkins.plugins.multijob;
 
-import java.util.List;
-import java.io.IOException;
-import javax.servlet.ServletException;
-
-import hudson.model.AbstractBuild;
-import hudson.model.Cause;
-import jenkins.model.Jenkins;
-import hudson.Extension;
-import hudson.model.DependencyGraph;
-import hudson.model.ItemGroup;
-import hudson.model.TopLevelItem;
-import hudson.model.Hudson;
-import hudson.model.Project;
-import hudson.model.TaskListener;
-import hudson.model.AbstractProject;
-import hudson.model.Descriptor.FormException;
-import hudson.util.AlternativeUiTextProvider;
-import hudson.scm.PollingResult;
-import hudson.scm.PollingResult.*;
-
 import com.tikal.jenkins.plugins.multijob.views.MultiJobView;
-
+import hudson.Extension;
+import hudson.model.*;
+import hudson.model.Descriptor.FormException;
+import hudson.model.listeners.RunListener;
+import hudson.model.queue.CauseOfBlockage;
+import hudson.model.queue.QueueTaskDispatcher;
+import hudson.scm.PollingResult;
+import hudson.util.AlternativeUiTextProvider;
+import jenkins.model.Jenkins;
 import net.sf.json.JSONObject;
 
 import org.apache.commons.lang.StringUtils;
 import org.kohsuke.stapler.StaplerRequest;
 import org.kohsuke.stapler.StaplerResponse;
+
+import javax.servlet.ServletException;
+import java.io.IOException;
+import java.util.List;
 
 public class MultiJobProject extends Project<MultiJobProject, MultiJobBuild>
 		implements TopLevelItem {
@@ -70,8 +62,53 @@ public class MultiJobProject extends Project<MultiJobProject, MultiJobBuild>
 			return new MultiJobProject(itemGroup, name);
 		}
 	}
+    @Extension(ordinal = 1001)
+    public static final QueueTaskDispatcherImpl QUEUETASKDISPATCHERIMPL = new QueueTaskDispatcherImpl();
 
-	@Override
+    public static final class QueueTaskDispatcherImpl extends QueueTaskDispatcher {
+        @Override
+        public CauseOfBlockage canTake(Node node, Queue.BuildableItem item) {
+            try {
+                MultiJobBuilder.MultiJobAction action = item.getAction(MultiJobBuilder.MultiJobAction.class);
+                if (action != null) {
+                    if (action.builder.isCanceled)
+                    {
+                        Queue queue = Jenkins.getInstance().getQueue();
+                        queue.cancel(item);
+                        return new CauseOfBlockage() {
+                            @Override
+                            public String getShortDescription() {
+                                return "some builds aborted";
+                            }
+                        };
+                    }
+                }
+            } catch (Exception e ) {}
+            return super.canTake(node, item);
+        }
+    }
+
+    @Extension(ordinal = 1002)
+    public static final RunListenerImpl RUNLISTENERIMPL = new RunListenerImpl();
+
+    public static final class RunListenerImpl extends RunListener<AbstractBuild> {
+        @Override
+        public void onCompleted(AbstractBuild item, TaskListener listener)
+        {
+            try {
+                if (item.getResult() != Result.SUCCESS)
+                {
+                    MultiJobBuilder.MultiJobAction action = item.getAction(MultiJobBuilder.MultiJobAction.class);
+                    if (action != null) {
+                        action.builder.isCanceled = true;
+                    }
+                }
+            }
+            catch (Exception e) {}
+        }
+    }
+
+    @Override
 	protected void buildDependencyGraph(DependencyGraph graph) {
 		super.buildDependencyGraph(graph);
 	}

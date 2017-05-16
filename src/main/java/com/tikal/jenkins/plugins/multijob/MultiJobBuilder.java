@@ -70,6 +70,7 @@ public class MultiJobBuilder extends Builder implements DependecyDeclarer {
     private List<PhaseJobsConfig> phaseJobs;
     private ContinuationCondition continuationCondition = ContinuationCondition.SUCCESSFUL;
     private ExecutionType executionType;
+    public boolean isCanceled;
 
     final static Pattern PATTERN = Pattern.compile("(\\$\\{.+?\\})", Pattern.CASE_INSENSITIVE);
 
@@ -197,6 +198,7 @@ public class MultiJobBuilder extends Builder implements DependecyDeclarer {
     @Override
     @SuppressWarnings({ "rawtypes", "unchecked" })
     public boolean perform(final AbstractBuild<?, ? > build, final Launcher launcher, final BuildListener listener) throws InterruptedException, IOException {
+        this.isCanceled = false;
         Jenkins jenkins = Jenkins.getInstance();
         MultiJobBuild multiJobBuild = (MultiJobBuild) build;
         MultiJobProject thisProject = multiJobBuild.getProject();
@@ -414,7 +416,7 @@ public class MultiJobBuilder extends Builder implements DependecyDeclarer {
         } catch (InterruptedException exception) {
             listener.getLogger().println("Aborting all subjobs.");
             for (SubTask _subTask : subTasks) {
-                _subTask.cancelJob();
+                _subTask.cancelJob(this);
                 phaseCounters.processAborted();
             }
             int i = 0;
@@ -484,10 +486,9 @@ public class MultiJobBuilder extends Builder implements DependecyDeclarer {
 
                                 reportFinish(listener, jobBuild, Result.ABORTED);
                                 abortSubBuild(subTask.multiJobBuild, multiJobProject, jobBuild);
-
-                                finish = true;
-                                break;
                             }
+                            finish = true;
+                            break;
                         }
 
                         try {
@@ -689,9 +690,11 @@ public class MultiJobBuilder extends Builder implements DependecyDeclarer {
                 return false;
             }
             if (killCondition.isKillPhase(subTask.result)) {
-                if (subTask.result != Result.ABORTED && subTask.phaseConfig.getAbortAllJob()) {
+                if (/*subTask.result != Result.ABORTED &&*/ subTask.phaseConfig.getAbortAllJob()) {
                     for (SubTask _subTask : subTasks) {
-                        _subTask.cancelJob();
+                        if (!_subTask.isCancelled() && _subTask != subTask) {
+                            _subTask.cancelJob(this);
+                        }
                     }
                     return true;
                 }
@@ -891,23 +894,19 @@ public class MultiJobBuilder extends Builder implements DependecyDeclarer {
         parametersActions = (List<Action>) projectConfig.getActions(build, listener, project, projectConfig.isCurrParams());
         actions.addAll(parametersActions);
         // }
-        actions.add(new MultiJobAction(build, index));
+        actions.add(new MultiJobAction(this, build, index));
 
     }
 
-    private class MultiJobAction implements Action, QueueAction {
+    public class MultiJobAction implements Action, QueueAction {
         public int buildNumber;
+        public AbstractBuild build;
         public int index;
+        public MultiJobBuilder builder;
 
-        /**
-         * @deprecated
-         * Maintain backwards compatibility with previous versions of this class.
-         * See https://wiki.jenkins-ci.org/display/JENKINS/Hint+on+retaining+backward+compatibility
-         */
-        @Deprecated
-        private transient AbstractBuild build;
 
-        public MultiJobAction(AbstractBuild build, int index) {
+	    public MultiJobAction(MultiJobBuilder builder, AbstractBuild build, int index) {
+            this.builder = builder;
             this.buildNumber = build.getNumber();
             this.index = index;
         }

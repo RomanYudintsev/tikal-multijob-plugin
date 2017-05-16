@@ -6,6 +6,7 @@ import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CopyOnWriteArrayList;
 
 import javax.servlet.ServletException;
@@ -34,7 +35,7 @@ public class MultiJobBuild extends Build<MultiJobProject, MultiJobBuild> {
 
     private List<SubBuild> subBuilds;
     private MultiJobChangeLogSet changeSets = new MultiJobChangeLogSet(this);
-    private Map<String, SubBuild> subBuildsMap = new HashMap<String, SubBuild>();
+    private Map<String, SubBuild> subBuildsMap = new ConcurrentHashMap<String, SubBuild>();
 
     public MultiJobBuild(MultiJobProject project) throws IOException {
         super(project);
